@@ -47,11 +47,13 @@ Szkic Arduino musi leżeć w folderze o takiej samej nazwie jak plik `.ino`.
 
 | Element | Szczegóły |
 |---|---|
-| Mikrokontroler | ESP32 (biblioteka `ESP32Servo`) |
+| Mikrokontroler | ESP32 / ESP32‑CAM (biblioteka `ESP32Servo`) |
 | IMU | MPU6050, adres I²C `0x68` |
 | Magnetometr | QMC5883P, adres I²C `0x2C`, widoczny na magistrali dzięki trybowi **BYPASS** MPU6050 |
 | I²C | SDA = GPIO 14, SCL = GPIO 15, 400 kHz |
 | Serwo skrętu | GPIO 12, impulsy 1000–2000 µs (0–180°) |
+
+> **ESP32‑CAM:** GPIO 12 jest pinem rozruchowym (strapping, MTDI) – podczas startu linia sygnałowa serwa nie może wymuszać stanu wysokiego, bo moduł może się nie uruchomić. GPIO 14/15 są współdzielone z kartą SD (nie używaj jej jednocześnie).
 
 Konfiguracja czujników w `setup()`: żyroskop ±500 °/s, akcelerometr ±2 g, próbkowanie 200 Hz, DLPF ≈ 44 Hz.
 
@@ -59,24 +61,34 @@ Konfiguracja czujników w `setup()`: żyroskop ±500 °/s, akcelerometr ±2 g, p
 
 1. Zainstaluj w Arduino IDE obsługę płytek ESP32 i bibliotekę **ESP32Servo**.
 2. Wgraj szkic. Podczas startu **nie ruszaj pojazdem** (ok. 1,5 s kalibracji biasu żyroskopu).
-3. Po ok. 3 s (zbieżność filtru) pojazd uzbraja się i wchodzi w `START_MODE` (domyślnie `Straight`).
-4. Komendy w Serial Monitorze (115200 baud):
+3. Po ok. 3 s (zbieżność filtru) pojazd uzbraja się i **sam wchodzi w tryb ustawiony w kodzie** (`START_MODE`). Trybu nie da się zmienić w trakcie jazdy – po zmianie trzeba wgrać kod ponownie (pojazd z ESP32‑CAM nie ma dostępu do Serial).
 
-| Komenda | Tryb | Działanie |
-|---|---|---|
-| `0` | Idle | serwo na środku |
-| `s` | Straight | utrzymanie kursu z chwili włączenia |
-| `c` | Circle | okrąg przeciwnie do ruchu wskazówek zegara |
-| `e` | Eight | ósemka (lemniskata) |
+Ustawienia na samej górze pliku `lemniscate_car.ino`:
 
-Każdy tryb startuje od **aktualnego kursu pojazdu** – ścieżka jest obracana tak, żeby zaczynała się tam, gdzie stoi auto.
+```cpp
+const Mode START_MODE = Mode::Straight;   // Idle | Straight | Circle | Eight
+#define SERIAL_OUTPUT true                // true = wypisuj na Serial, false = nic nie wypisuj
+```
 
-5. Telemetria (co 100 ms):
+| `START_MODE` | Działanie |
+|---|---|
+| `Mode::Idle` | serwo na środku |
+| `Mode::Straight` | utrzymanie kursu z chwili startu |
+| `Mode::Circle` | okrąg przeciwnie do ruchu wskazówek zegara |
+| `Mode::Eight` | ósemka (lemniskata) |
+
+Tryb startuje od **aktualnego kursu pojazdu** – ścieżka jest obracana tak, żeby zaczynała się tam, gdzie stoi auto.
+
+4. **Flaga `SERIAL_OUTPUT`**: przy `true` szkic wypisuje komunikaty startowe, kalibracyjne i telemetrię; przy `false` nic nie wypisuje i w ogóle nie inicjalizuje Serial (UART0 pozostaje wolny).
+
+   Telemetria (co 100 ms, tylko gdy `SERIAL_OUTPUT true`):
    `M` – tryb, `R/P/Y` – roll/pitch/yaw [°], `MAG` – ważność magnetometru, `href` – kurs zadany [°], `herr` – błąd kursu [°], `k` – krzywizna [1/m], `servo` – komenda serwa [°].
+
+> **Uwaga przy jeździe bez Serial:** pojazd rusza w wybranym trybie ok. 3 s po włączeniu zasilania, a przez pierwszą ok. 1,5 s kalibracji żyroskopu musi stać nieruchomo. Magnetometr skalibruj wcześniej z `SERIAL_OUTPUT true` i wpisz wartości na stałe (`MAG_CAL_AT_BOOT 0`).
 
 ### Kalibracja magnetometru
 
-Ustaw `MAG_CAL_AT_BOOT 1`, wgraj i przez 20 s obracaj czujnik we wszystkich osiach (ósemki w powietrzu). Skopiuj z Serial Monitora wypisane `magOffset` i `magScale` do kodu i wróć do `MAG_CAL_AT_BOOT 0`. Kalibruj **na zmontowanym pojeździe** (silnik i serwo zniekształcają pole). Do sprawdzenia mapowania osi służy `DEBUG_MAG_AXES 1`.
+Ustaw `MAG_CAL_AT_BOOT 1`, wgraj i przez 20 s obracaj czujnik we wszystkich osiach (ósemki w powietrzu). Przy `SERIAL_OUTPUT true` skopiuj z Serial Monitora wypisane `magOffset` i `magScale` do kodu i wróć do `MAG_CAL_AT_BOOT 0`. Kalibruj **na zmontowanym pojeździe** (silnik i serwo zniekształcają pole). Do sprawdzenia mapowania osi służy `DEBUG_MAG_AXES 1`.
 
 ## Architektura
 
@@ -304,14 +316,16 @@ $$G = K_\omega\cdot\frac{v}{L}\cdot\frac{\pi}{180}\cdot\frac{1}{k_s}$$
 | `BETA_START` / `BETA_RUN` | 1,0 / 0,1 | $\beta$ filtru: pierwsze 3 s / potem |
 | `LOOP_DT` | 0,01 s | okres pętli (100 Hz) |
 | `MAG_TIMEOUT_MS` | 200 ms | po tym czasie bez próbki filtr przechodzi na 6DOF |
+| `START_MODE` | `Mode::Straight` | tryb jazdy po starcie (zmiana tylko w kodzie) |
+| `SERIAL_OUTPUT` | `true` | `true` – wypisuje na Serial, `false` – brak wypisów i Serial wyłączony |
 
 ## Strojenie krok po kroku
 
-1. **Bez napędu, na stole.** Sprawdź, że `yaw` rośnie przy obrocie w lewo i że po kalibracji magnetometr stabilizuje yaw (stan `MAG:OK`).
-2. **Znak skrętu.** Komenda `c` powinna skręcać koła w lewo. Jeśli skręcają w prawo, zmień `STEER_SIGN` na `-1`.
+1. **Bez napędu, na stole.** Sprawdź, że `yaw` rośnie przy obrocie w lewo i że po kalibracji magnetometr stabilizuje yaw (stan `MAG:OK` w telemetrii przy `SERIAL_OUTPUT true`).
+2. **Znak skrętu.** Ustaw `START_MODE = Mode::Circle` – koła powinny skręcać w lewo. Jeśli skręcają w prawo, zmień `STEER_SIGN` na `-1`.
 3. **Rozstaw osi.** Wpisz rzeczywiste `wheelbase`. Zmierz maksymalny skręt kół i sprawdź warunek z sekcji 7.
-4. **Okrąg przed ósemką.** Uruchom `c` na małej prędkości, obserwuj `herr`. Powinien być bliski zeru.
-5. **Ósemka.** Zwiększaj `vehicleSpeed` stopniowo. Jeśli `servo` nasyca się na ±30°, zmniejsz $v$ lub zwiększ $a$.
+4. **Okrąg przed ósemką.** Uruchom `Mode::Circle` na małej prędkości i obserwuj `herr` (przy `SERIAL_OUTPUT true`). Powinien być bliski zeru.
+5. **Ósemka.** Ustaw `Mode::Eight` i zwiększaj `vehicleSpeed` stopniowo. Jeśli `servo` nasyca się na ±30°, zmniejsz $v$ lub zwiększ $a$.
 6. **Kurs:** zwiększ `K_heading`, jeśli pojazd „spóźnia się” za ścieżką; zmniejsz, jeśli kołysze.
 
 ## Ograniczenia
